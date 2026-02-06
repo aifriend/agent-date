@@ -1,0 +1,22 @@
+# Core dependencies
+pydantic>=2.0
+python-dateutil>=2.8
+holidays>=0.40  # For validated calendar holidays (official government sources)
+
+# LLM Backend (Azure OpenAI) - optional
+openai>=1.0
+azure-identity>=1.15
+
+# Server & Frontend
+fastapi>=0.104
+uvicorn>=0.24
+httpx>=0.25
+gradio>=4.0
+
+# Development dependencies (install with pip install -e ".[dev]")
+# pytest>=7.0
+# pytest-asyncio>=0.21
+# pytest-cov>=4.0
+# black>=23.0
+# ruff>=0.1
+# mypy>=1.0

@@ -76,6 +76,7 @@ ENGLISH_PERIOD_DESCRIPTIONS: Dict[str, str] = {
     "yesterday": "yesterday",
     "this_week": "this week",
     "last_week": "last week",
+    "last_weekend": "last weekend",
     "week_before_last": "the week before last",
     "this_month": "this month",
     "last_month": "last month",
@@ -84,6 +85,7 @@ ENGLISH_PERIOD_DESCRIPTIONS: Dict[str, str] = {
     "this_year": "this year",
     "last_year": "last year",
     "ytd": "year to date",
+    "recent": "last 7 days",
 }
 
 
@@ -212,5 +214,43 @@ def get_period_description_en(period_type: str, year: int = None, quarter: int =
         if year:
             return f"{ordinals[quarter - 1]} quarter {year}"
         return f"{ordinals[quarter - 1]} quarter"
+
+    # Named month: "named_month"
+    if period_type == "named_month":
+        month_names_en = [
+            "", "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+        if quarter and 1 <= quarter <= 12:
+            return month_names_en[quarter]
+        return "specific month"
+
+    # Named year: "named_year"
+    if period_type == "named_year" and year:
+        return f"year {year}"
+
+    # Custom date range
+    if period_type == "custom":
+        return "custom date range"
+
+    # Dynamic last_N_business_days patterns
+    biz_match = re.match(r"^last_(\d+)_business_days$", period_type)
+    if biz_match:
+        n = int(biz_match.group(1))
+        return f"last {n} business days"
+
+    # Day-of-week filter patterns
+    dow_match = re.match(r"^dow_filter_(.+)$", period_type)
+    if dow_match:
+        base = dow_match.group(1)
+        base_desc = get_period_description_en(base, year, quarter)
+        return base_desc
+
+    # Dynamic last_N_X patterns
+    last_n_match = re.match(r"^last_(\d+)_(days|weeks|months)$", period_type)
+    if last_n_match:
+        n = int(last_n_match.group(1))
+        unit = last_n_match.group(2)
+        return f"last {n} {unit}"
 
     return period_type

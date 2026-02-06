@@ -72,6 +72,10 @@ SPANISH_PERIOD_PATTERNS: Dict[str, str] = {
     r"^ytd$": "ytd",
     r"^año\s+hasta\s+la\s+fecha$": "ytd",
     r"^acumulado\s+del\s+año$": "ytd",
+    r"^hasta\s+el\s+momento$": "ytd",
+    r"^hasta\s+ahora$": "ytd",
+    r"^hasta\s+la\s+fecha$": "ytd",
+    r"^al\s+d[ií]a\s+de\s+hoy$": "ytd",
     # Named quarters (Q1-Q4 with year)
     r"^q([1-4])\s*(\d{4})$": "named_quarter",
     r"^t([1-4])\s*(\d{4})$": "named_quarter",  # "T1 2024" format
@@ -89,6 +93,7 @@ SPANISH_PERIOD_DESCRIPTIONS: Dict[str, str] = {
     "yesterday": "ayer",
     "this_week": "esta semana",
     "last_week": "la semana pasada",
+    "last_weekend": "el fin de semana pasado",
     "week_before_last": "la semana antepasada",
     "this_month": "este mes",
     "last_month": "el mes pasado",
@@ -97,6 +102,7 @@ SPANISH_PERIOD_DESCRIPTIONS: Dict[str, str] = {
     "this_year": "este año",
     "last_year": "el año pasado",
     "ytd": "acumulado del año",
+    "recent": "últimos 7 días",
 }
 
 
@@ -226,5 +232,45 @@ def get_period_description_es(period_type: str, year: int = None, quarter: int =
         if year:
             return f"{quarter_names[quarter - 1]} trimestre {year}"
         return f"{quarter_names[quarter - 1]} trimestre"
+
+    # Named month: "named_month"
+    if period_type == "named_month":
+        month_names_es = [
+            "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+        ]
+        # Use quarter param as month number (overloaded)
+        if quarter and 1 <= quarter <= 12:
+            return month_names_es[quarter]
+        return "mes específico"
+
+    # Named year: "named_year"
+    if period_type == "named_year" and year:
+        return f"año {year}"
+
+    # Custom date range
+    if period_type == "custom":
+        return "rango de fechas personalizado"
+
+    # Dynamic last_N_business_days patterns
+    biz_match = re.match(r"^last_(\d+)_business_days$", period_type)
+    if biz_match:
+        n = int(biz_match.group(1))
+        return f"últimos {n} días hábiles"
+
+    # Day-of-week filter patterns
+    dow_match = re.match(r"^dow_filter_(.+)$", period_type)
+    if dow_match:
+        base = dow_match.group(1)
+        base_desc = get_period_description_es(base, year, quarter)
+        return base_desc
+
+    # Dynamic last_N_X patterns
+    last_n_match = re.match(r"^last_(\d+)_(days|weeks|months)$", period_type)
+    if last_n_match:
+        n = int(last_n_match.group(1))
+        unit = last_n_match.group(2)
+        unit_es = {"days": "días", "weeks": "semanas", "months": "meses"}
+        return f"últimos {n} {unit_es.get(unit, unit)}"
 
     return period_type

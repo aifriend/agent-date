@@ -113,6 +113,96 @@ class DateReasoningAgent:
             intent = await self.semantic_parser.parse(query)
             self.logger.debug(f"Intent: {intent.intent_type}, period={intent.period}")
 
+            # Handle event_lookup queries (no date period to resolve)
+            if intent.intent_type == "event_lookup":
+                self.logger.info("Event lookup query - no period resolution needed")
+                return {
+                    "success": True,
+                    "query": query,
+                    "audit_id": execution_id,
+                    "reference_date": reference_result.get("date"),
+                    "timezone": reference_result.get("timezone"),
+                    "intent_type": "event_lookup",
+                    "description": "Esta consulta requiere buscar un evento específico (no un periodo de fechas). "
+                                   "El sistema upstream debe proporcionar la fecha del evento.",
+                    "computation_trace": {
+                        "intent_type": intent.intent_type,
+                        "confidence": intent.confidence,
+                        "plan_steps": 0,
+                        "is_compositional": False,
+                    },
+                }
+
+            # Handle comparison queries (two periods)
+            if intent.intent_type == "comparison" and intent.period_2:
+                self.logger.info(f"Comparison query: {intent.period} vs {intent.period_2}")
+                # Resolve both periods
+                plan_1 = self.query_decomposer.decompose(
+                    ParsedIntent(
+                        intent_type="resolve_period",
+                        period=intent.period,
+                        period_raw=query,
+                        locale=intent.locale,
+                        calendar_system=intent.calendar_system,
+                        exclude_holidays=intent.exclude_holidays,
+                        business_days_only=intent.business_days_only,
+                        confidence=intent.confidence,
+                    ),
+                    reference_result,
+                )
+                results_1 = await self._execute_plan(plan_1, reference_result, session_id)
+
+                plan_2 = self.query_decomposer.decompose(
+                    ParsedIntent(
+                        intent_type="resolve_period",
+                        period=intent.period_2,
+                        period_raw=query,
+                        locale=intent.locale,
+                        calendar_system=intent.calendar_system,
+                        exclude_holidays=intent.exclude_holidays,
+                        business_days_only=intent.business_days_only,
+                        confidence=intent.confidence,
+                    ),
+                    reference_result,
+                )
+                results_2 = await self._execute_plan(plan_2, reference_result, session_id)
+
+                # Build comparison response
+                period_1_result = results_1.get("resolve_period", {})
+                period_2_result = results_2.get("resolve_period", {})
+
+                response = {
+                    "success": True,
+                    "query": query,
+                    "audit_id": execution_id,
+                    "reference_date": reference_result.get("date"),
+                    "timezone": reference_result.get("timezone"),
+                    "intent_type": "comparison",
+                    "period_1": {
+                        "period": intent.period,
+                        "start_date": period_1_result.get("start_date"),
+                        "end_date": period_1_result.get("end_date"),
+                        "calendar_days": period_1_result.get("calendar_days"),
+                        "description": period_1_result.get("description_localized"),
+                    },
+                    "period_2": {
+                        "period": intent.period_2,
+                        "start_date": period_2_result.get("start_date"),
+                        "end_date": period_2_result.get("end_date"),
+                        "calendar_days": period_2_result.get("calendar_days"),
+                        "description": period_2_result.get("description_localized"),
+                    },
+                    "computation_trace": {
+                        "intent_type": "comparison",
+                        "confidence": intent.confidence,
+                        "plan_steps": len(plan_1.steps) + len(plan_2.steps),
+                        "is_compositional": False,
+                    },
+                }
+
+                await self.audit_manager.finalize_session(session_id, response)
+                return response
+
             # Step 3: Decompose into tool call plan
             plan = self.query_decomposer.decompose(intent, reference_result)
             self.logger.debug(f"Plan: {len(plan.steps)} steps")
@@ -350,6 +440,12 @@ class DateReasoningAgent:
                 response["operations_applied"] = compute_result.get("operations_applied")
                 response["holidays_excluded"] = compute_result.get("holidays_excluded")
                 response["weekends_excluded"] = compute_result.get("weekends_excluded")
+
+        # Add day-of-week filter info if present
+        if intent.day_of_week_filter is not None:
+            day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            response["day_of_week_filter"] = intent.day_of_week_filter
+            response["day_of_week_name"] = day_names[intent.day_of_week_filter]
 
         # Add computation trace for transparency
         response["computation_trace"] = {

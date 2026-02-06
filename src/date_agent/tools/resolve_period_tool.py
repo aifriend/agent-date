@@ -123,6 +123,148 @@ user's temporal expressions into precise date ranges."""
 
         return output, steps
 
+    # Normalization map for common LLM output variations
+    _PERIOD_NORMALIZATION_MAP = {
+        # YTD variations (Spanish and English)
+        "year_to_date": "ytd",
+        "year-to-date": "ytd",
+        "yeartodate": "ytd",
+        "hasta_el_momento": "ytd",
+        "hasta el momento": "ytd",
+        "hasta_ahora": "ytd",
+        "hasta ahora": "ytd",
+        "hasta_la_fecha": "ytd",
+        "hasta la fecha": "ytd",
+        "al_dia_de_hoy": "ytd",
+        "acumulado_del_año": "ytd",
+        "acumulado_del_ano": "ytd",
+        "en lo que va del año": "ytd",
+        "en lo que va del ano": "ytd",
+        "start_of_year_to_now": "ytd",
+        "start_of_year": "ytd",
+        "beginning_of_year": "ytd",
+        "from_start_of_year": "ytd",
+        "desde_inicio_del_año": "ytd",
+        "desde_inicio_del_ano": "ytd",
+        # Weekend variations
+        "last_weekend": "last_weekend",
+        "fin_de_semana_pasado": "last_weekend",
+        # Week variations
+        "previous_week": "last_week",
+        "past_week": "last_week",
+        "semana_pasada": "last_week",
+        "ultima_semana": "last_week",
+        "última_semana": "last_week",
+        "semana_antepasada": "week_before_last",
+        # Month variations
+        "previous_month": "last_month",
+        "past_month": "last_month",
+        "mes_pasado": "last_month",
+        "mes_anterior": "last_month",
+        "ultimo_mes": "last_month",
+        "último_mes": "last_month",
+        # Quarter variations
+        "previous_quarter": "last_quarter",
+        "past_quarter": "last_quarter",
+        "trimestre_pasado": "last_quarter",
+        "trimestre_anterior": "last_quarter",
+        "ultimo_trimestre": "last_quarter",
+        "último_trimestre": "last_quarter",
+        # Year variations
+        "previous_year": "last_year",
+        "past_year": "last_year",
+        "año_pasado": "last_year",
+        "ano_pasado": "last_year",
+        # Recent
+        "recent": "last_week",
+        # Common dynamic patterns (belt-and-suspenders for LLM output)
+        "last 3 months": "last_3_months",
+        "last 3 days": "last_3_days",
+        "last 7 days": "last_7_days",
+        "last 15 days": "last_15_days",
+        "last 30 days": "last_30_days",
+    }
+
+    def _normalize_period(self, period: str) -> Tuple[str, dict]:
+        """Normalize a period expression from LLM or other sources.
+
+        Handles variations like underscores, Spanish phrases, and
+        dynamic 'last_N_X' patterns.
+
+        Args:
+            period: Raw period expression.
+
+        Returns:
+            Tuple of (normalized_period, extracted_values).
+        """
+        normalized = period.lower().strip()
+
+        # Direct mapping
+        if normalized in self._PERIOD_NORMALIZATION_MAP:
+            return self._PERIOD_NORMALIZATION_MAP[normalized], {}
+
+        # Handle "last_N_business_days" patterns
+        biz_match = re.match(
+            r"^(?:last|últimos?|ultimos?)[_\s]?(\d+)[_\s]?(?:business[_\s]?days?|d[ií]as?\s*h[áa]biles?)$",
+            normalized,
+        )
+        if biz_match:
+            n = int(biz_match.group(1))
+            return f"last_{n}_business_days", {"count": n, "unit": "business_days"}
+
+        # Handle "last_N_X" patterns dynamically: last_3_months, last_15_days, etc.
+        last_n_match = re.match(
+            r"^(?:last|últimos?|ultimos?)[_\s]?(\d+)[_\s]?(days?|d[ií]as?|weeks?|semanas?|months?|meses?)$",
+            normalized,
+        )
+        if last_n_match:
+            n = int(last_n_match.group(1))
+            raw_unit = last_n_match.group(2).rstrip("s")
+            # Normalize unit to English
+            unit_map = {
+                "day": "days", "dia": "days", "día": "days",
+                "week": "weeks", "semana": "weeks",
+                "month": "months", "mes": "months", "mese": "months",
+            }
+            unit = unit_map.get(raw_unit, f"{raw_unit}s")
+            return f"last_{n}_{unit}", {"count": n, "unit": unit}
+
+        # Handle bare month names (Spanish/English)
+        month_names = {
+            "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+            "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+            "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+        if normalized in month_names:
+            month_num = month_names[normalized]
+            return f"named_month_{month_num}", {"month": month_num}
+
+        # Handle bare year: "2024"
+        if re.match(r"^\d{4}$", normalized):
+            return f"year_{normalized}", {"year": int(normalized)}
+
+        # Handle explicit date range: "2025-01-01 to 2025-01-15"
+        range_match = re.match(
+            r"^(\d{4}-\d{2}-\d{2})\s+(?:to|a|al|-)\s+(\d{4}-\d{2}-\d{2})$",
+            normalized,
+        )
+        if range_match:
+            return f"custom:{range_match.group(1)}:{range_match.group(2)}", {
+                "start_date": range_match.group(1),
+                "end_date": range_match.group(2),
+            }
+
+        # Handle comma-separated periods (comparison from LLM)
+        if "," in normalized:
+            parts = [p.strip() for p in normalized.split(",")]
+            if len(parts) == 2:
+                return f"comparison:{parts[0]}:{parts[1]}", {}
+
+        return normalized, {}
+
     def _parse_period(
         self, period: str, locale: str
     ) -> Tuple[str, dict]:
@@ -141,6 +283,24 @@ user's temporal expressions into precise date ranges."""
         if normalized in [p.value for p in PeriodType]:
             return normalized, {}
 
+        # Custom date range: "custom:2025-01-01:2025-01-15"
+        custom_match = re.match(r"^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$", normalized)
+        if custom_match:
+            return "custom", {
+                "start_date": custom_match.group(1),
+                "end_date": custom_match.group(2),
+            }
+
+        # Bare year: "year_2024"
+        year_match = re.match(r"^year_(\d{4})$", normalized)
+        if year_match:
+            return "named_year", {"year": int(year_match.group(1))}
+
+        # Bare month: "named_month_8" (August)
+        month_match = re.match(r"^named_month_(\d{1,2})$", normalized)
+        if month_match:
+            return "named_month", {"month": int(month_match.group(1))}
+
         # Try named quarter pattern: Q1 2024, q3_2024, etc.
         quarter_match = re.match(r"^q([1-4])[\s_]?(\d{4})$", normalized)
         if quarter_match:
@@ -148,6 +308,62 @@ user's temporal expressions into precise date ranges."""
                 "quarter": int(quarter_match.group(1)),
                 "year": int(quarter_match.group(2)),
             }
+
+        # Comparison queries: "comparison:q1_2024:q2_2024"
+        comparison_match = re.match(r"^comparison:(.+):(.+)$", normalized)
+        if comparison_match:
+            # Return first period; the agent/decomposer handles both periods
+            first_period = comparison_match.group(1)
+            return self._parse_period(first_period, locale)
+
+        # Check if it's already a dynamic last_N_X pattern or extended period type
+        if re.match(r"^last_\d+_(days|weeks|months|business_days)$", normalized):
+            return normalized, {}
+        if normalized in ("last_weekend", "recent"):
+            return normalized, {}
+
+        # Day-of-week filter: "dow_filter:0:last_month"
+        dow_match = re.match(r"^dow_filter:(\d):(.+)$", normalized)
+        if dow_match:
+            dow = int(dow_match.group(1))
+            base_period = dow_match.group(2)
+            # Parse the base period, add dow filter to extracted
+            base_type, base_extracted = self._parse_period(base_period, locale)
+            base_extracted["day_of_week_filter"] = dow
+            return f"dow_filter_{base_type}", base_extracted
+
+        # Try normalization (handles LLM output variations and last_N_X patterns)
+        norm_period, norm_extracted = self._normalize_period(normalized)
+        if norm_period != normalized:
+            # Check if normalized form is a canonical name or extended type
+            if norm_period in [p.value for p in PeriodType]:
+                return norm_period, norm_extracted
+            if norm_period in ("last_weekend", "recent"):
+                return norm_period, norm_extracted
+            # Check if it's a dynamic last_N_X pattern (including business_days)
+            if re.match(r"^last_\d+_(days|weeks|months|business_days)$", norm_period):
+                return norm_period, norm_extracted
+            # Check for named_month pattern
+            month_m = re.match(r"^named_month_(\d{1,2})$", norm_period)
+            if month_m:
+                return "named_month", {"month": int(month_m.group(1))}
+            # Check for year, custom, comparison patterns from normalization
+            if norm_period.startswith("year_"):
+                year_m = re.match(r"^year_(\d{4})$", norm_period)
+                if year_m:
+                    return "named_year", {"year": int(year_m.group(1))}
+            if norm_period.startswith("custom:"):
+                custom_m = re.match(r"^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$", norm_period)
+                if custom_m:
+                    return "custom", {
+                        "start_date": custom_m.group(1),
+                        "end_date": custom_m.group(2),
+                    }
+            if norm_period.startswith("comparison:"):
+                comp_m = re.match(r"^comparison:(.+):(.+)$", norm_period)
+                if comp_m:
+                    first_p = comp_m.group(1)
+                    return self._parse_period(first_p, locale)
 
         # Try locale-specific parsing
         try:
@@ -215,6 +431,20 @@ user's temporal expressions into precise date ranges."""
             two_weeks_ago_monday = this_monday - timedelta(days=14)
             two_weeks_ago_sunday = two_weeks_ago_monday + timedelta(days=6)
             return two_weeks_ago_monday, two_weeks_ago_sunday
+
+        elif period_type == "last_weekend":
+            # Last weekend = previous Saturday and Sunday
+            days_since_monday = ref_date.weekday()
+            this_monday = ref_date - timedelta(days=days_since_monday)
+            # Last Sunday is the day before this Monday
+            last_sunday = this_monday - timedelta(days=1)
+            last_saturday = last_sunday - timedelta(days=1)
+            return last_saturday, last_sunday
+
+        elif period_type == "recent":
+            # "Recent" = last 7 days (rolling)
+            start_date = ref_date - timedelta(days=7)
+            return start_date, ref_date
 
         elif period_type == "this_month":
             first_day = ref_date.replace(day=1)
@@ -300,7 +530,85 @@ user's temporal expressions into precise date ranges."""
             target_date = ref_date - timedelta(days=days)
             return target_date, target_date
 
+        elif period_type == "named_year":
+            # Bare year: "2024" -> Jan 1 to Dec 31
+            target_year = extracted.get("year", year)
+            return date(target_year, 1, 1), date(target_year, 12, 31)
+
+        elif period_type == "named_month":
+            # Bare month: "agosto" -> August 1-31 of the most recent occurrence
+            target_month = extracted.get("month", 1)
+            target_year = extracted.get("year", year)
+            # If the month hasn't occurred yet this year, use last year
+            if target_month > month or (target_month == month and ref_date.day < calendar.monthrange(year, target_month)[1]):
+                target_year = year  # Current year (month hasn't ended yet or is current)
+            if target_month > month:
+                target_year = year - 1  # Month hasn't happened this year yet
+            first_day = date(target_year, target_month, 1)
+            last_day_num = calendar.monthrange(target_year, target_month)[1]
+            last_day = date(target_year, target_month, last_day_num)
+            return first_day, last_day
+
+        elif period_type == "custom":
+            # Explicit date range: custom with start_date and end_date
+            start_str = extracted.get("start_date")
+            end_str = extracted.get("end_date")
+            if start_str and end_str:
+                start = datetime.strptime(start_str, "%Y-%m-%d").date()
+                end = datetime.strptime(end_str, "%Y-%m-%d").date()
+                return start, end
+            raise InvalidPeriodError(
+                period=period_type,
+                message="Custom period requires start_date and end_date",
+            )
+
         else:
+            # Dynamic last_N_business_days patterns
+            biz_match = re.match(r"^last_(\d+)_business_days$", period_type)
+            if biz_match:
+                n = int(biz_match.group(1))
+                # Walk backwards counting only business days (Mon-Fri)
+                count = 0
+                current = ref_date
+                while count < n:
+                    current = current - timedelta(days=1)
+                    if current.weekday() < 5:  # Monday=0 to Friday=4
+                        count += 1
+                return current, ref_date
+
+            # Day-of-week filter patterns: dow_filter_last_month, dow_filter_this_month
+            dow_filter_match = re.match(r"^dow_filter_(.+)$", period_type)
+            if dow_filter_match:
+                base_period = dow_filter_match.group(1)
+                # Resolve base period first
+                base_extracted = {k: v for k, v in extracted.items() if k != "day_of_week_filter"}
+                start, end = self._resolve_to_dates(base_period, base_extracted, ref_date)
+                # The day_of_week_filter is in extracted but the range is the base period range
+                # The agent/caller can use day_of_week_filter to post-filter
+                return start, end
+
+            # Dynamic last_N_X patterns: last_3_months, last_15_days, last_2_weeks
+            last_n_match = re.match(r"^last_(\d+)_(days|weeks|months)$", period_type)
+            if last_n_match:
+                n = int(last_n_match.group(1))
+                unit = last_n_match.group(2)
+
+                if unit == "days":
+                    start_date = ref_date - timedelta(days=n)
+                    return start_date, ref_date
+                elif unit == "weeks":
+                    start_date = ref_date - timedelta(weeks=n)
+                    return start_date, ref_date
+                elif unit == "months":
+                    # Go back N months
+                    target_month = month - n
+                    target_year = year
+                    while target_month <= 0:
+                        target_month += 12
+                        target_year -= 1
+                    start_date = date(target_year, target_month, 1)
+                    return start_date, ref_date
+
             raise InvalidPeriodError(
                 period=period_type,
                 message=f"Unknown period type: {period_type}",
@@ -328,6 +636,9 @@ user's temporal expressions into precise date ranges."""
         """
         year = extracted.get("year")
         quarter = extracted.get("quarter")
+        # For named_month, pass month number via quarter param (overloaded)
+        if period_type == "named_month" and "month" in extracted:
+            quarter = extracted["month"]
 
         if locale == "es":
             base = get_period_description_es(period_type, year, quarter)

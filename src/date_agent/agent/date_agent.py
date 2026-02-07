@@ -249,10 +249,20 @@ class DateReasoningAgent:
         Args:
             execution_id: Execution identifier.
             context: Optional context with override settings.
+                     If 'reference_date' key is present (YYYY-MM-DD str),
+                     builds the reference result directly without calling
+                     get_current_date_info, enabling deterministic testing.
 
         Returns:
             Reference date information from get_current_date_info.
         """
+        # If a reference_date override is provided, build result directly
+        if context and "reference_date" in context:
+            return self._build_reference_from_date(
+                context["reference_date"],
+                context.get("timezone", self.config.default_timezone),
+            )
+
         # Create execution context
         exec_context = ToolExecutionContext.create_default(
             execution_id=execution_id,
@@ -281,6 +291,102 @@ class DateReasoningAgent:
 
         return result.output.model_dump()
 
+    def _build_reference_from_date(
+        self, reference_date_str: str, tz_name: str = "America/Lima"
+    ) -> Dict[str, Any]:
+        """Build a reference result dict from a fixed date string.
+
+        Produces output matching CurrentDateOutput.model_dump() so that
+        downstream code works unchanged.
+
+        Args:
+            reference_date_str: Date in YYYY-MM-DD format.
+            tz_name: IANA timezone name.
+
+        Returns:
+            Dict matching CurrentDateOutput schema.
+        """
+        import calendar as cal_mod
+        from datetime import date as date_cls
+
+        from date_agent.localization import get_month_name, get_weekday_name
+
+        ref = date_cls.fromisoformat(reference_date_str)
+        locale = self.config.default_locale
+
+        weekday = ref.weekday()  # 0=Monday
+        iso_cal = ref.isocalendar()
+        quarter = (ref.month - 1) // 3 + 1
+        quarter_start_month = (quarter - 1) * 3 + 1
+        quarter_end_month = quarter * 3
+        _, quarter_end_day = cal_mod.monthrange(ref.year, quarter_end_month)
+
+        # Week boundaries (Monday-Sunday)
+        this_monday = ref - __import__("datetime").timedelta(days=weekday)
+        this_sunday = this_monday + __import__("datetime").timedelta(days=6)
+        last_monday = this_monday - __import__("datetime").timedelta(days=7)
+        last_sunday = last_monday + __import__("datetime").timedelta(days=6)
+
+        # Month boundaries
+        _, month_end_day = cal_mod.monthrange(ref.year, ref.month)
+        this_month_start = ref.replace(day=1)
+        this_month_end = ref.replace(day=month_end_day)
+        if ref.month == 1:
+            last_month_start = date_cls(ref.year - 1, 12, 1)
+            last_month_end = date_cls(ref.year - 1, 12, 31)
+        else:
+            last_month_start = date_cls(ref.year, ref.month - 1, 1)
+            _, lm_end = cal_mod.monthrange(ref.year, ref.month - 1)
+            last_month_end = date_cls(ref.year, ref.month - 1, lm_end)
+
+        # Lookback limit
+        lookback_months = self.config.max_lookback_months
+        lb_month = ref.month - lookback_months
+        lb_year = ref.year
+        while lb_month <= 0:
+            lb_month += 12
+            lb_year -= 1
+        _, lb_max_day = cal_mod.monthrange(lb_year, lb_month)
+        lookback_date = date_cls(lb_year, lb_month, min(ref.day, lb_max_day))
+
+        en_weekday_names = [
+            "Monday", "Tuesday", "Wednesday", "Thursday",
+            "Friday", "Saturday", "Sunday",
+        ]
+        en_month_names = [
+            "", "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+
+        return {
+            "date": ref.isoformat(),
+            "datetime_iso": f"{ref.isoformat()}T10:00:00-05:00",
+            "timestamp_utc": 0,
+            "timezone": tz_name,
+            "year": ref.year,
+            "month": ref.month,
+            "day": ref.day,
+            "weekday": weekday,
+            "weekday_name": en_weekday_names[weekday],
+            "weekday_name_localized": get_weekday_name(weekday, locale),
+            "month_name": en_month_names[ref.month],
+            "month_name_localized": get_month_name(ref.month, locale),
+            "iso_week": iso_cal[1],
+            "iso_year": iso_cal[0],
+            "current_quarter": quarter,
+            "this_week_monday": this_monday.isoformat(),
+            "this_week_sunday": this_sunday.isoformat(),
+            "last_week_monday": last_monday.isoformat(),
+            "last_week_sunday": last_sunday.isoformat(),
+            "this_month_start": this_month_start.isoformat(),
+            "this_month_end": this_month_end.isoformat(),
+            "last_month_start": last_month_start.isoformat(),
+            "last_month_end": last_month_end.isoformat(),
+            "quarter_start": date_cls(ref.year, quarter_start_month, 1).isoformat(),
+            "quarter_end": date_cls(ref.year, quarter_end_month, quarter_end_day).isoformat(),
+            "lookback_limit_date": lookback_date.isoformat(),
+        }
+
     async def _execute_plan(
         self,
         plan: ExecutionPlan,
@@ -298,9 +404,21 @@ class DateReasoningAgent:
             Dict mapping step_id to results.
         """
         results: Dict[str, Any] = {"reference": reference_result}
+
+        # Build execution context with reference date from the reference result
+        # so that tools (resolve_period, etc.) use the correct anchor date
+        ref_date_override = None
+        ref_date_str = reference_result.get("date")
+        if ref_date_str:
+            from datetime import datetime as dt_cls, timezone as tz_mod
+            ref_date_override = dt_cls.fromisoformat(ref_date_str).replace(
+                hour=10, minute=0, second=0, tzinfo=tz_mod.utc
+            )
+
         exec_context = ToolExecutionContext.create_default(
             execution_id=session_id,
             config=self.config,
+            reference_date=ref_date_override,
         )
 
         for step in plan.steps:

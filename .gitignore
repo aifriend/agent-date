@@ -74,6 +74,17 @@ dmypy.json
 # macOS
 .DS_Store
 
+# Claude Code
+.claude/
+
+# Cursor
+.cursorindexingignore
+.specstory/
+
+# Feedback loop artifacts
+feedback_state*.json
+feedback_logs*/
+
 # Audit logs (keep structure, ignore content)
 logs/*.log
 logs/*.json

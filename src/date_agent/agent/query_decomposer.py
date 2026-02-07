@@ -70,6 +70,9 @@ class QueryDecomposer:
             if intent.period == "named_quarter" and intent.extracted_values.get("year"):
                 # Use the raw period text which contains the year
                 period_to_resolve = intent.period_raw or intent.period
+            elif intent.period == "named_month" and intent.extracted_values.get("month"):
+                # Use the raw period text which contains month name + year
+                period_to_resolve = intent.period_raw or intent.period
 
             steps.append(
                 ToolCallSpec(

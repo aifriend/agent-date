@@ -360,11 +360,27 @@ class SemanticParser:
         Returns:
             Extracted period type, or None.
         """
+        # Early check: comparison queries with "vs" must be handled before
+        # individual period patterns (e.g. "este mes") match first.
+        vs_match = re.search(
+            r"(?:comparar\s+)?(.+?)\s+vs\.?\s+(?:el\s+|la\s+)?(.+)",
+            query, re.IGNORECASE,
+        )
+        if vs_match:
+            left = vs_match.group(1).strip()
+            right = vs_match.group(2).strip()
+            left_period = self._resolve_comparison_side(left)
+            right_period = self._resolve_comparison_side(right)
+            if left_period and right_period:
+                return f"comparison:{left_period}:{right_period}"
+
         # Common period expressions to search for within queries (Spanish + English)
         period_expressions = [
             # Explicit date range: "entre el 1 y 15 de enero 2025", "del 1 al 15 de marzo 2024"
             (r"entre\s+(?:el\s+)?(\d{1,2})\s+(?:y|al)\s+(?:el\s+)?(\d{1,2})\s+de\s+(\w+)\s+(?:de\s+|del?\s+)?(\d{4})", "explicit_date_range_same_month"),
             (r"del?\s+(\d{1,2})\s+al\s+(\d{1,2})\s+de\s+(\w+)\s+(?:de\s+|del?\s+)?(\d{4})", "explicit_date_range_same_month"),
+            # Explicit cross-month date range: "del 15 de marzo al 15 de abril 2024"
+            (r"del?\s+(\d{1,2})\s+de\s+(\w+)\s+al\s+(\d{1,2})\s+de\s+(\w+)\s+(\d{4})", "explicit_date_range_cross_month"),
             # Explicit date range with ISO dates
             (r"(\d{4}-\d{2}-\d{2})\s+(?:to|a|al|hasta)\s+(\d{4}-\d{2}-\d{2})", "explicit_iso_range"),
             # YTD expressions
@@ -383,13 +399,17 @@ class SemanticParser:
             (r"fin\s+de\s+semana\s+pasado", "last_weekend"),
             (r"el\s+fin\s+de\s+semana\s+pasado", "last_weekend"),
             (r"finde\s+pasado", "last_weekend"),
+            (r"el\s+finde\s+pasado", "last_weekend"),
             (r"last\s+weekend", "last_weekend"),
+            # Year expressions (EN) - before week to avoid "last" ambiguity
+            (r"last\s+year", "last_year"),
             # Week expressions
             (r"esta\s+semana", "this_week"),
             (r"semana\s+pasada", "last_week"),
             (r"la\s+semana\s+pasada", "last_week"),
             (r"[úu]ltima\s+semana", "last_week"),
             (r"semana\s+antepasada", "week_before_last"),
+            (r"(?:the\s+)?week\s+before\s+last", "week_before_last"),
             (r"last\s+week", "last_week"),
             (r"this\s+week", "this_week"),
             # Day-of-week filter (BEFORE month expressions to avoid partial matching)
@@ -420,8 +440,12 @@ class SemanticParser:
             (r"this\s+year", "this_year"),
             # Comparison: "entre Q1 y Q2 de 2024", "diferencia entre Q1 y Q2 2024"
             (r"(?:entre|diferencia\s+(?:de\s+)?(?:consumo\s+)?entre)\s+q([1-4])\s+y\s+q([1-4])\s+(?:de\s+|del?\s+)?(\d{4})", "comparison_quarters"),
-            # Named quarters
-            (r"q([1-4])\s*(\d{4})", "named_quarter"),
+            # Comparison with "vs": "Q1 2024 vs Q2 2024"
+            (r"q([1-4])\s*(?:del?\s+)?(\d{4})\s+vs\.?\s+q([1-4])\s*(?:del?\s+)?(\d{4})", "comparison_quarters_vs"),
+            # Named quarters (with optional "del" or "de")
+            (r"q([1-4])\s*(?:del?\s+)?(\d{4})", "named_quarter"),
+            # "trimestre N de YYYY" format
+            (r"trimestre\s+([1-4])\s+(?:de|del)\s+(\d{4})", "named_quarter"),
             # Dynamic "last N X" with business days - Spanish
             (r"[úu]ltimos?\s+(\d+)\s+d[ií]as?\s+h[áa]biles?", "last_n_business_days"),
             (r"(?:los|las)\s+[úu]ltimos?\s+(\d+)\s+d[ií]as?\s+h[áa]biles?", "last_n_business_days"),
@@ -471,6 +495,26 @@ class SemanticParser:
                     q2 = match.group(2)
                     yr = match.group(3)
                     return f"comparison:q{q1}_{yr}:q{q2}_{yr}"
+                # Handle comparison quarters with "vs": "Q1 2024 vs Q2 2024"
+                if period_type == "comparison_quarters_vs":
+                    q1 = match.group(1)
+                    yr1 = match.group(2)
+                    q2 = match.group(3)
+                    yr2 = match.group(4)
+                    return f"comparison:q{q1}_{yr1}:q{q2}_{yr2}"
+                # Handle explicit date range (cross month)
+                if period_type == "explicit_date_range_cross_month":
+                    day1 = int(match.group(1))
+                    month1_name = match.group(2).lower()
+                    day2 = int(match.group(3))
+                    month2_name = match.group(4).lower()
+                    yr = int(match.group(5))
+                    month1_num = self._spanish_month_to_number(month1_name)
+                    month2_num = self._spanish_month_to_number(month2_name)
+                    if month1_num and month2_num:
+                        start_d = f"{yr}-{month1_num:02d}-{day1:02d}"
+                        end_d = f"{yr}-{month2_num:02d}-{day2:02d}"
+                        return f"custom:{start_d}:{end_d}"
                 # Handle explicit date range (same month)
                 if period_type == "explicit_date_range_same_month":
                     day1 = int(match.group(1))
@@ -568,11 +612,49 @@ class SemanticParser:
         }
         return days.get(day_name.lower())
 
+    def _resolve_comparison_side(self, text: str) -> Optional[str]:
+        """Resolve one side of a 'vs' comparison to a canonical period."""
+        normalized = text.lower().strip()
+        side_map = {
+            "este mes": "this_month",
+            "el mes pasado": "last_month",
+            "mes pasado": "last_month",
+            "mes anterior": "last_month",
+            "esta semana": "this_week",
+            "la semana pasada": "last_week",
+            "semana pasada": "last_week",
+            "este trimestre": "this_quarter",
+            "el trimestre pasado": "last_quarter",
+            "trimestre pasado": "last_quarter",
+            "este año": "this_year",
+            "el año pasado": "last_year",
+            "año pasado": "last_year",
+            "hoy": "today",
+            "ayer": "yesterday",
+            "this month": "this_month",
+            "last month": "last_month",
+            "this week": "this_week",
+            "last week": "last_week",
+            "this quarter": "this_quarter",
+            "last quarter": "last_quarter",
+            "this year": "this_year",
+            "last year": "last_year",
+            "today": "today",
+            "yesterday": "yesterday",
+        }
+        if normalized in side_map:
+            return side_map[normalized]
+        # Named quarter: "Q1 2024"
+        q_match = re.match(r"^q([1-4])\s*(?:del?\s+)?(\d{4})$", normalized)
+        if q_match:
+            return f"q{q_match.group(1)}_{q_match.group(2)}"
+        return None
+
     def _is_event_query(self, query: str) -> bool:
         """Detect queries asking about specific events, not date periods."""
         event_patterns = [
-            r"cuál\s+(ha\s+sido|fue)\s+mi\s+últim[ao]",
-            r"cual\s+(ha\s+sido|fue)\s+mi\s+ultim[ao]",
+            r"cu[áa]l\s+(ha\s+sido|fue)\s+mi\s+[úu]ltim[ao]",
+            r"cu[áa]ndo\s+fue\s+mi\s+[úu]ltim[ao]",
             r"cuando\s+fue\s+(la\s+)?últim[ao]\s+vez",
             r"cuando\s+fue\s+(la\s+)?ultim[ao]\s+vez",
             r"cu[áa]ndo\s+fue\s+(la\s+)?[úu]ltim[ao]\s+vez",
@@ -604,6 +686,10 @@ class SemanticParser:
             r"cu[áa]ndo\s+fue\s+mi\s+[úu]ltimo\s+pago",
             r"[úu]ltimo\s+pago\s+de\s+tarjeta",
             r"cu[áa]ndo\s+(?:es|ser[áa])\s+mi\s+(?:pr[óo]xim[ao]\s+)?(?:fecha\s+de\s+)?(?:pago|corte|vencimiento)",
+            # Expiry / vencimiento / caducidad queries
+            r"cu[áa]ndo\s+(?:caduca|expira|vence)",
+            r"fecha\s+de\s+(?:caducidad|expiraci[óo]n|vencimiento)",
+            r"cu[áa]ndo\s+se\s+vence",
             # Statement / estado de cuenta queries
             r"(?:fecha\s+(?:de|del)\s+)?(?:mi\s+)?[úu]ltimo\s+estado\s+de\s+cuenta",
             r"estado\s+de\s+cuenta",

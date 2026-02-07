@@ -40,6 +40,8 @@ SPANISH_PERIOD_PATTERNS: Dict[str, str] = {
     # Today/Yesterday
     r"^hoy$": "today",
     r"^ayer$": "yesterday",
+    # Year to date (add explicit pattern for "hasta el momento")
+    r"^hasta\s+el\s+momento$": "ytd",
     # Weeks
     r"^(esta\s+)?semana(\s+actual)?$": "this_week",
     r"^semana\s+pasada$": "last_week",
@@ -48,6 +50,12 @@ SPANISH_PERIOD_PATTERNS: Dict[str, str] = {
     r"^última\s+semana$": "last_week",
     r"^semana\s+antepasada$": "week_before_last",  # Unique Spanish expression
     r"^la\s+semana\s+antepasada$": "week_before_last",
+    # Weekend (colloquial and formal)
+    r"^fin\s+de\s+semana\s+pasado$": "last_weekend",
+    r"^el\s+fin\s+de\s+semana\s+pasado$": "last_weekend",
+    r"^finde\s+pasado$": "last_weekend",
+    r"^el\s+finde\s+pasado$": "last_weekend",
+    r"^el\s+finde\s+pasado$": "last_weekend",  # Add explicit pattern for "el finde pasado"
     # Months
     r"^(este\s+)?mes(\s+actual)?$": "this_month",
     r"^mes\s+pasado$": "last_month",
@@ -77,12 +85,15 @@ SPANISH_PERIOD_PATTERNS: Dict[str, str] = {
     r"^hasta\s+la\s+fecha$": "ytd",
     r"^al\s+d[ií]a\s+de\s+hoy$": "ytd",
     # Named quarters (Q1-Q4 with year)
-    r"^q([1-4])\s*(\d{4})$": "named_quarter",
-    r"^t([1-4])\s*(\d{4})$": "named_quarter",  # "T1 2024" format
-    r"^primer\s+trimestre\s*(\d{4})?$": "q1",
-    r"^segundo\s+trimestre\s*(\d{4})?$": "q2",
-    r"^tercer\s+trimestre\s*(\d{4})?$": "q3",
-    r"^cuarto\s+trimestre\s*(\d{4})?$": "q4",
+    r"^q([1-4])\s*(?:del?\s+)?(\d{4})$": "named_quarter",
+    r"^t([1-4])\s*(?:del?\s+)?(\d{4})$": "named_quarter",  # "T1 2024" format
+    r"^trimestre\s+([1-4])\s+(?:de|del)\s+(\d{4})$": "named_quarter",  # "trimestre 1 de 2024"
+    r"^primer\s+trimestre\s*(?:(?:de|del)\s+)?(\d{4})?$": "q1",
+    r"^segundo\s+trimestre\s*(?:(?:de|del)\s+)?(\d{4})?$": "q2",
+    r"^tercer\s+trimestre\s*(?:(?:de|del)\s+)?(\d{4})?$": "q3",
+    r"^cuarto\s+trimestre\s*(?:(?:de|del)\s+)?(\d{4})?$": "q4",
+    # Named month + year: "mayo 2024", "en enero 2024"
+    r"^(?:en\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+(?:de\s+|del?\s+)?(\d{4})$": "named_month",
     # Days ago pattern - "hace N días"
     r"^hace\s+(\d+)\s+d[ií]as?$": "days_ago",
 }
@@ -170,6 +181,12 @@ def parse_spanish_period(text: str) -> Tuple[str, Dict[str, int]]:
                 extracted["quarter"] = quarter
                 if year:
                     extracted["year"] = year
+            elif period_type == "named_month":
+                month_name = match.group(1).lower()
+                month_map = {n.lower(): i for i, n in enumerate(MONTH_NAMES_ES) if i > 0}
+                extracted["month"] = month_map[month_name]
+                if match.lastindex >= 2:
+                    extracted["year"] = int(match.group(2))
 
             return period_type, extracted
 

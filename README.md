@@ -28,7 +28,7 @@ The agent **never computes dates directly**. This ensures:
 ## Project Structure
 
 ```
-agent_date/
+agent-date/
 ├── src/date_agent/
 │   ├── core/                    # Config, exceptions, constants, audit
 │   ├── models/                  # Pydantic schemas
@@ -39,22 +39,66 @@ agent_date/
 │   │   └── compute_date_range_tool.py # compute_date_range
 │   ├── calendars/               # Calendar implementations
 │   │   ├── gregorian.py         # Standard (weekends only)
-│   │   └── peru_banking.py      # Peru banking holidays
+│   │   ├── peru_banking.py      # Peru banking holidays
+│   │   └── peru_banking_validated.py # Holidays from the `holidays` package
 │   ├── localization/            # Spanish/English support
-│   └── agent/                   # Semantic parser, orchestrator
+│   ├── agent/                   # Semantic parser, query decomposer, orchestrator
+│   └── feedback/                # Autonomous feedback loop (see below)
 ├── tests/
 │   ├── unit/                    # Tool-level tests
-│   └── integration/             # Full agent pipeline tests
+│   ├── integration/             # Full agent pipeline tests
+│   ├── api/                     # Backend server tests
+│   └── feedback/                # Feedback system tests
+├── server.py                    # FastAPI backend
+├── app.py                       # Gradio frontend
+├── run.sh                       # Local launcher for backend and frontend
+├── start.sh                     # Container entry point (used by the Dockerfile)
+├── Dockerfile
 ├── pyproject.toml
-├── requirements.txt
-└── .env.example
+└── requirements.txt
 ```
+
+## Feedback Loop
+
+The `date_agent.feedback` package runs the agent against generated queries and checks each
+answer against an independent ground truth. When a query fails, it can attempt an automatic
+fix and re-run the regression tests. The loop stops once it reaches a target number of
+consecutive successes, or a maximum number of queries.
+
+Each cycle works as follows:
+
+1. The challenger generates a batch of queries.
+2. The validator runs each query through the date agent and compares the result with the ground truth.
+3. A passing query increases the consecutive-success count. A failing query goes to the auto-fixer, which gets a limited number of attempts.
+4. The loop checks its stopping criteria, then repeats, and finally writes a report.
+
+Part of the query generation uses Azure OpenAI when it is configured, so set the
+`AZURE_OPENAI_*` variables described under [Configuration](#configuration) to enable it.
+
+```bash
+# Quick smoke test
+PYTHONPATH=src python -m date_agent.feedback.cli --target 10 --batch-size 10
+
+# Full run (defaults: target 1000 consecutive successes, at most 5000 queries)
+PYTHONPATH=src python -m date_agent.feedback.cli --target 1000
+
+# Validation only, without auto-fixing
+PYTHONPATH=src python -m date_agent.feedback.cli --no-auto-fix --target 100
+
+# Resume from a saved state file
+PYTHONPATH=src python -m date_agent.feedback.cli --resume feedback_state.json
+```
+
+Other options are `--max-queries`, `--reference-date` (default `2024-07-15`), `--batch-size`
+(default 50), `--no-regression-tests`, `--state-file` (default `feedback_state.json`),
+`--log-dir` (default `feedback_logs`) and `--log-level`. Run the module with `--help` to
+see them all.
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - pip
 
 ### Setup
@@ -69,21 +113,13 @@ agent_date/
 
 2. **Install dependencies**:
    ```bash
-   # For basic usage
-   pip install pydantic python-dateutil
-
-   # For development (includes testing tools)
-   pip install pydantic python-dateutil pytest pytest-asyncio
-
-   # Optional: For Azure OpenAI semantic parsing
-   pip install openai azure-identity
+   # Install the package with the development extras (tests, linting, FastAPI test client)
+   pip install -e ".[dev]"
    ```
 
-3. **Configure environment** (optional, for Azure OpenAI):
-   ```bash
-   cp .env.example .env
-   # Edit .env with your Azure OpenAI credentials
-   ```
+3. **Configure environment** (optional, for Azure OpenAI): export the variables listed
+   under [Configuration](#configuration) in your shell. The repository does not ship an
+   `.env.example` file.
 
 ## Running Tests
 
@@ -136,8 +172,8 @@ The agent includes a Gradio-based web interface for interactive testing.
 # Make sure you're in the project directory with venv activated
 source .venv/bin/activate
 
-# Install additional dependencies for the UI
-pip install fastapi uvicorn httpx gradio
+# Install additional dependencies for the UI (the dev extras already include fastapi and httpx)
+pip install uvicorn gradio
 
 # Option 1: Use the startup script (recommended)
 ./run.sh
@@ -168,17 +204,19 @@ Once running, open your browser:
 ### Environment Variables
 
 ```bash
-# Backend
-DATE_AGENT_PORT=8000           # Backend server port
+# Backend (server.py)
+DATE_AGENT_BACKEND_PORT=8000   # Backend server port (falls back to DATE_AGENT_PORT, then 8000)
 DATE_AGENT_HOST=0.0.0.0        # Backend server host
-DATE_AGENT_TIMEZONE=America/Lima
-DATE_AGENT_LOCALE=es
-DATE_AGENT_CALENDAR=PERU_BANKING
 
-# Frontend
-GRADIO_PORT=7860               # Gradio frontend port
+# Frontend (app.py)
+GRADIO_SERVER_PORT=7860        # Gradio frontend port (falls back to PORT, then 7860)
 DATE_AGENT_BACKEND_URL=http://localhost:8000
 ```
+
+The agent defaults (timezone, locale, calendar, lookback, audit) use the
+`DATE_AGENT_DEFAULT_*` names described under [Configuration](#configuration). `run.sh`
+reads `DATE_AGENT_PORT` and `GRADIO_PORT` only to choose the port it waits on and prints,
+so set `DATE_AGENT_BACKEND_PORT` and `GRADIO_SERVER_PORT` as well if you change ports.
 
 ### Features
 
@@ -354,15 +392,25 @@ AZURE_OPENAI_API_KEY=your-api-key
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
 AZURE_OPENAI_DEPLOYMENT=gpt-4
 
-# Agent defaults
+# Agent defaults (the same names the Dockerfile sets)
 DATE_AGENT_DEFAULT_TIMEZONE=America/Lima
 DATE_AGENT_DEFAULT_LOCALE=es
 DATE_AGENT_MAX_LOOKBACK_MONTHS=6
 DATE_AGENT_ENABLE_AUDIT=true
 
+# Calendar system: read by server.py under a different name than the Dockerfile uses
+DATE_AGENT_CALENDAR=PERU_BANKING
+
 # Logging
 LOG_LEVEL=INFO
 ```
+
+`DateAgentConfig` reads the `DATE_AGENT_DEFAULT_*`, `DATE_AGENT_MAX_LOOKBACK_MONTHS` and
+`DATE_AGENT_ENABLE_AUDIT` variables, and they override values passed in code. `server.py`
+also reads `DATE_AGENT_TIMEZONE`, `DATE_AGENT_LOCALE`, `DATE_AGENT_LOOKBACK` and
+`DATE_AGENT_AUDIT` as fallbacks, but the `DATE_AGENT_DEFAULT_*` names win when both are set.
+The Dockerfile sets `DATE_AGENT_DEFAULT_CALENDAR`, which no code reads; to change the
+calendar use `DATE_AGENT_CALENDAR`.
 
 ### Programmatic Configuration
 
